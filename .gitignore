@@ -1,0 +1,30 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+.env
+# Project directories
+downloads/
+quarantine/
+data/
+archive/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.env
+# OS
+Thumbs.db
+.env
+.DS_Store

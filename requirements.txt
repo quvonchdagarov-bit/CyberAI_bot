@@ -1,0 +1,20 @@
+# === Asosiy (majburiy) ===
+aiogram>=3.10
+aiohttp>=3.9
+python-dotenv>=1.0
+aiosqlite>=0.20
+
+# === AI va API ===
+google-genai>=1.0
+
+# === Rasm tahlili (OCR + QR) ===
+Pillow>=10.0
+pytesseract>=0.3
+pyzbar>=0.1
+
+# === Antivirus va malware ===
+pyclamd>=0.4
+yara-python>=4.3
+
+# === APK tahlili ===
+androguard>=3.4
