@@ -1,5 +1,7 @@
 # Environment
 .env
+.env*
+*.env
 
 # Python
 __pycache__/
@@ -11,7 +13,6 @@ build/
 venv/
 env/
 
-.env
 # Project directories
 downloads/
 quarantine/
@@ -23,10 +24,7 @@ archive/
 .idea/
 *.swp
 *.swo
-.env
+
 # OS
 Thumbs.db
-.env
 .DS_Store
-.env 
-.env 

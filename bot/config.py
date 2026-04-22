@@ -28,6 +28,7 @@ class Settings:
     DELETE_BAD_MESSAGES: bool = os.getenv("DELETE_BAD_MESSAGES", "false").lower() == "true"
     MAX_FILE_SIZE_MB: int = int(os.getenv("MAX_FILE_SIZE_MB", "40"))
     URL_ANALYSIS_LIMIT: int = int(os.getenv("URL_ANALYSIS_LIMIT", "3"))
+    GLOBAL_RISK_THRESHOLD: int = int(os.getenv("GLOBAL_RISK_THRESHOLD", "65"))
 
     # Papkalar
     DOWNLOAD_DIR: Path = Path(os.getenv("DOWNLOAD_DIR", "downloads"))
@@ -47,6 +48,9 @@ class Settings:
 
 
 settings = Settings()
+
+# Debug: Thresholdni tekshirish
+print(f"🛡 Risk Alert Threshold: {settings.GLOBAL_RISK_THRESHOLD}")
 
 # Tekshirish
 if not settings.BOT_TOKEN:

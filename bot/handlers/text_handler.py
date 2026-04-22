@@ -44,7 +44,7 @@ async def handle_text_message(message: Message):
     text_result = await analyze_text(message.text)
     text_score = int(text_result.get("score", 0))
 
-    if text_score >= 40:
+    if text_score > settings.GLOBAL_RISK_THRESHOLD:
         await _send_analysis_result(
             message, text_result, "text", user_id, chat_id,
             tag=text_result.get("tag"),
@@ -98,6 +98,15 @@ async def handle_text_message(message: Message):
                 except Exception:
                     pass
 
+        # Faqat risk belgilangan darajadan yuqori bo'lsa xabar berish
+        if best_score <= settings.GLOBAL_RISK_THRESHOLD:
+            logger.info("Low risk URL score (%d <= %d). Silencing alert.", best_score, settings.GLOBAL_RISK_THRESHOLD)
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            return
+
         # Status xabarni natija bilan almashtirish
         try:
             await status_msg.edit_text(short_text, reply_markup=keyboard)
@@ -142,6 +151,10 @@ async def _send_analysis_result(
                 await message.delete()
             except Exception:
                 pass
+
+    if score <= settings.GLOBAL_RISK_THRESHOLD:
+        logger.info("Low risk content score (%d <= %d). Silencing alert.", score, settings.GLOBAL_RISK_THRESHOLD)
+        return
 
     await message.reply(short_text, reply_markup=keyboard)
 

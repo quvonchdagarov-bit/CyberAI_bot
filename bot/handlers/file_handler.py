@@ -110,6 +110,15 @@ async def handle_file_message(message: Message):
                 except Exception as e:
                     logger.warning("Xabarni o'chirishda xato (admin huquqi yo'q bo'lishi mumkin): %s", e)
 
+        # Faqat risk belgilangan darajadan yuqori bo'lsa xabar berish
+        if score <= settings.GLOBAL_RISK_THRESHOLD:
+            logger.info("Low risk score (%d <= %d). Silencing alert for %s", score, settings.GLOBAL_RISK_THRESHOLD, filename)
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            return
+
         # Status xabarni natija bilan almashtirish
         try:
             await status_msg.edit_text(short_text, reply_markup=keyboard)
@@ -178,7 +187,7 @@ async def handle_caption_message(message: Message):
 
         keyboard = get_result_keyboard(scan_id, score)
 
-        if score >= 70:
-            await maybe_delete(message)
+        if score <= settings.GLOBAL_RISK_THRESHOLD:
+            return
 
         await message.reply(short_text, reply_markup=keyboard)
