@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  # 1. Telegram Bot servisi
+  bot:
+    build: .
+    container_name: cyberai_bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./downloads:/app/downloads
+      - ./quarantine:/app/quarantine
+      - ./rules:/app/rules
+      - ./archive:/app/archive
+    depends_on:
+      clamav:
+        condition: service_healthy
+
+  # 2. ClamAV Antivirus servisi
+  clamav:
+    image: clamav/clamav:latest
+    container_name: clamav_scanner
+    restart: always
+    # ClamAV ko'p resurs talab qilishi mumkin, limit qo'yish ixtiyoriy
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 1G
+    healthcheck:
+      test: ["CMD", "clamdscan", "--version"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
