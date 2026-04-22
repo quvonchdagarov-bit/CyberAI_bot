@@ -5,11 +5,10 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     libzbar0 \
-    libyara0 \
     libyara-dev \
-    gcc \
-    python3-dev \
+    libssl-dev \
     build-essential \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # 3. Ishchi papka (Working directory)
