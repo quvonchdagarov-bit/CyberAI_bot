@@ -1,4 +1,4 @@
-"""Ma'lumotlar bazasi so'rovlari — foydalanuvchi, scan tarixi, sozlamalar."""
+"""Ma'lumotlar bazasi so'rovlari — yangi funksiyalar qo'shilgan."""
 
 import json
 from datetime import datetime
@@ -7,9 +7,10 @@ from typing import Any
 from bot.database.db import get_db
 
 
-# =========================
+# ═══════════════════════════════════════════
 # Foydalanuvchilar
-# =========================
+# ═══════════════════════════════════════════
+
 async def upsert_user(user_id: int, username: str | None, full_name: str | None):
     """Foydalanuvchini qo'shish yoki yangilash."""
     db = await get_db()
@@ -65,9 +66,52 @@ async def get_total_users() -> int:
     return row[0] if row else 0
 
 
-# =========================
+async def get_all_users() -> list[dict]:
+    """Barcha foydalanuvchilarni olish (broadcast uchun)."""
+    db = await get_db()
+    cursor = await db.execute("SELECT user_id, username, is_banned FROM users")
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def ban_user(user_id: int) -> None:
+    """Foydalanuvchini bloklash."""
+    db = await get_db()
+    await db.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user_id,))
+    await db.commit()
+
+
+async def unban_user(user_id: int) -> None:
+    """Foydalanuvchini blokdan chiqarish."""
+    db = await get_db()
+    await db.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (user_id,))
+    await db.commit()
+
+
+async def is_user_banned(user_id: int) -> bool:
+    """Foydalanuvchi bloklangan-bloklamamganini tekshirish."""
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT is_banned FROM users WHERE user_id = ?", (user_id,)
+    )
+    row = await cursor.fetchone()
+    return bool(row and row["is_banned"])
+
+
+async def increment_user_scan_count(user_id: int) -> None:
+    """Foydalanuvchi tekshiruv sonini oshirish."""
+    db = await get_db()
+    await db.execute(
+        "UPDATE users SET total_scans = total_scans + 1 WHERE user_id = ?",
+        (user_id,),
+    )
+    await db.commit()
+
+
+# ═══════════════════════════════════════════
 # Tekshiruv tarixi
-# =========================
+# ═══════════════════════════════════════════
+
 async def save_scan(
     user_id: int,
     chat_id: int,
@@ -78,19 +122,23 @@ async def save_scan(
     result_data: dict[str, Any],
     short_report: str,
     full_report: str,
+    tools_count: int = 0,
+    scan_time_ms: int = 0,
 ) -> int:
     """Tekshiruv natijasini saqlash."""
     db = await get_db()
     cursor = await db.execute(
         """
-        INSERT INTO scans (user_id, chat_id, scan_type, target, score,
-                           risk_level, result_json, short_report, full_report)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO scans
+            (user_id, chat_id, scan_type, target, score,
+             risk_level, result_json, short_report, full_report,
+             tools_count, scan_time_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             user_id, chat_id, scan_type, target[:200], score,
             risk_level, json.dumps(result_data, ensure_ascii=False),
-            short_report, full_report,
+            short_report, full_report, tools_count, scan_time_ms,
         ),
     )
     await db.commit()
@@ -116,7 +164,7 @@ async def get_user_scans(user_id: int, page: int = 1, per_page: int = 5) -> list
     offset = (page - 1) * per_page
     cursor = await db.execute(
         """
-        SELECT id, scan_type, target, score, risk_level, created_at
+        SELECT id, scan_type, target, score, risk_level, created_at, scan_time_ms
         FROM scans
         WHERE user_id = ?
         ORDER BY created_at DESC
@@ -145,9 +193,27 @@ async def clear_user_history(user_id: int):
     await db.commit()
 
 
-# =========================
+async def get_recent_dangerous_scans(limit: int = 10) -> list[dict]:
+    """Oxirgi xavfli (75+) skanlarni olish (admin uchun)."""
+    db = await get_db()
+    cursor = await db.execute(
+        """
+        SELECT id, user_id, scan_type, target, score, risk_level, created_at
+        FROM scans
+        WHERE score >= 75
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ═══════════════════════════════════════════
 # Statistika
-# =========================
+# ═══════════════════════════════════════════
+
 async def get_user_stats(user_id: int) -> dict[str, Any]:
     """Foydalanuvchi statistikasi."""
     db = await get_db()
@@ -175,11 +241,18 @@ async def get_user_stats(user_id: int) -> dict[str, Any]:
     last_row = await cursor.fetchone()
     last_scan = last_row["created_at"] if last_row else None
 
+    cursor = await db.execute(
+        "SELECT AVG(score) FROM scans WHERE user_id = ? AND score > 0", (user_id,)
+    )
+    avg_row = await cursor.fetchone()
+    avg_score = round(avg_row[0] or 0, 1)
+
     return {
         "total": total,
         "dangerous": dangerous,
         "by_type": by_type,
         "last_scan": last_scan,
+        "avg_score": avg_score,
     }
 
 
@@ -190,6 +263,9 @@ async def get_global_stats() -> dict[str, Any]:
     cursor = await db.execute("SELECT COUNT(*) FROM users")
     users = (await cursor.fetchone())[0]
 
+    cursor = await db.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1")
+    banned = (await cursor.fetchone())[0]
+
     cursor = await db.execute("SELECT COUNT(*) FROM scans")
     total_scans = (await cursor.fetchone())[0]
 
@@ -199,9 +275,16 @@ async def get_global_stats() -> dict[str, Any]:
     cursor = await db.execute("SELECT COUNT(*) FROM scans WHERE score >= 75")
     critical = (await cursor.fetchone())[0]
 
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM scans WHERE date(created_at) = date('now')"
+    )
+    today_scans = (await cursor.fetchone())[0]
+
     return {
         "users": users,
+        "banned": banned,
         "total_scans": total_scans,
         "dangerous": dangerous,
         "critical": critical,
+        "today_scans": today_scans,
     }

@@ -1,5 +1,12 @@
-"""Umumiy fayl tahlili — kengaytma, entropiya, hash, VT, ClamAV, YARA."""
+"""Umumiy fayl tahlili — 16 ta xavfsizlik vositasi bilan.
 
+Qo'shimcha (yangi):
+- Metadata tahlili (PDF, DOCX, XLSX, rasm EXIF)
+- Xavfsiz fayl o'chirish (DoD standart)
+- Skanerlash vaqtini qayd etish
+"""
+
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -26,6 +33,7 @@ from bot.analyzers.apk_analyzer import analyze_apk_permissions
 from bot.analyzers.archive_analyzer import inspect_zip
 from bot.analyzers.image_analyzer import extract_image_text, extract_qr_data
 from bot.analyzers.pdf_analyzer import analyze_pdf
+from bot.analyzers.metadata_analyzer import analyze_metadata
 from bot.analyzers.scoring import calculate_final_risk
 from bot.analyzers.text_analyzer import analyze_text
 from bot.analyzers.url_analyzer import analyze_url
@@ -38,23 +46,24 @@ from bot.loader import logger
 async def analyze_saved_file(
     path: Path, filename: str, mime_type: str | None = None
 ) -> dict[str, Any]:
-    """Faylni to'liq tahlil qilish — barcha tekshiruvlarni bajarish.
+    """Faylni to'liq 16 ta xavfsizlik vositasi bilan tahlil qilish.
 
-    13 ta xavfsizlik vositasi bilan to'liq skan:
-    1. Hash (SHA256, MD5)
-    2. Entropy analiz
-    3. Fayl kengaytma tekshiruvi
-    4. Double extension aniqlash
-    5. Kalit so'z tekshiruvi
-    6. Arxiv (ZIP) tahlili
-    7. APK (Androguard) tahlili
-    8. PDF tahlili
-    9. OCR (pytesseract) — rasm ichidagi matn
-    10. QR kod (pyzbar) — rasm ichidagi QR
-    11. ClamAV antivirus skan
-    12. YARA qoidalar skan
-    13. VirusTotal API tekshiruvi
+    1.  Hash (SHA256, MD5)
+    2.  Entropy tahlili
+    3.  Fayl kengaytma tekshiruvi
+    4.  Double extension aniqlash
+    5.  Kalit so'z tekshiruvi
+    6.  Metadata tahlili (PDF, DOCX, EXIF) ← YANGI
+    7.  Arxiv (ZIP) tahlili
+    8.  APK (Androguard) tahlili
+    9.  PDF tahlili
+    10. OCR (pytesseract) — rasm ichidagi matn
+    11. QR kod (pyzbar) — rasm ichidagi QR
+    12. ClamAV antivirus skan
+    13. YARA qoidalar skan
+    14. VirusTotal API tekshiruvi
     """
+    scan_start = time.monotonic()
     ext = Path(filename).suffix.lower()
     lower_name = filename.lower()
     size_bytes = path.stat().st_size
@@ -77,42 +86,47 @@ async def analyze_saved_file(
         "entropy": entropy,
         "base_score": 0,
         "reasons": [],
-        # Vositalar holati (AI hisobot uchun)
-        "tools_used": [],
+        "tools_used": ["Hash (SHA256/MD5)", "Entropy Analysis"],
+        "scan_time_ms": 0,
     }
 
-    # Har doim ishlatiladigan vositalar
-    result["tools_used"].extend(["Hash (SHA256/MD5)", "Entropy Analysis"])
-
-    # Shubhali kengaytma
+    # ── Shubhali kengaytma ─────────────────────────────────────────────────
     if ext in SUSPICIOUS_EXTS:
         result["base_score"] += 18
         result["reasons"].append(f"shubhali kengaytma: {ext}")
 
-    # Ikki qavatli kengaytma
+    # ── Ikki qavatli kengaytma ─────────────────────────────────────────────
     if is_double_extension(filename):
         result["base_score"] += 35
-        result["reasons"].append("soxta ikki qavatli nom")
+        result["reasons"].append("soxta ikki qavatli nom (maskan: fayl.pdf.exe)")
 
-    # Xavfli kalit so'z fayl nomida
-    if any(
-        x in lower_name
-        for x in ["crack", "mod", "premium", "keygen", "patch", "unlock"]
-    ):
+    # ── Xavfli kalit so'zlar ───────────────────────────────────────────────
+    dangerous_keywords = ["crack", "mod", "premium", "keygen", "patch", "unlock", "cheat", "hack"]
+    found_kw = [kw for kw in dangerous_keywords if kw in lower_name]
+    if found_kw:
         result["base_score"] += 12
-        result["reasons"].append("fayl nomida xavfli kalit so'z bor")
+        result["reasons"].append(f"fayl nomida xavfli so'z: {', '.join(found_kw)}")
 
-    # Entropiya tahlili
+    # ── Entropiya tahlili ──────────────────────────────────────────────────
     if entropy > 7.4:
-        result["base_score"] += 18
+        result["base_score"] += 20
         result["reasons"].append(
-            "entropiya juda yuqori, packed yoki shifrlangan bo'lishi mumkin"
+            f"entropiya juda yuqori ({entropy}) — qadoqlangan yoki shifrlangan"
         )
     elif entropy > 6.8:
         result["base_score"] += 8
-        result["reasons"].append("entropiya biroz yuqori")
+        result["reasons"].append(f"entropiya biroz yuqori ({entropy})")
 
-    # Arxiv tekshiruvi
+    # ── Metadata tahlili ───────────────────────────────────────────────────
+    meta_result = analyze_metadata(path)
+    if meta_result.get("enabled"):
+        result["metadata"] = meta_result
+        result["tools_used"].append("Metadata Analyzer")
+        if meta_result.get("score", 0) > 0:
+            result["base_score"] = max(result["base_score"], meta_result["score"])
+            result["reasons"].extend(meta_result.get("reasons", []))
+
+    # ── Arxiv tekshiruvi ───────────────────────────────────────────────────
     if ext in ARCHIVE_EXTS or zipfile.is_zipfile(path):
         archive_info = inspect_zip(path)
         result["archive_info"] = archive_info
@@ -120,18 +134,17 @@ async def analyze_saved_file(
         result["reasons"].extend(archive_info.get("reasons", []))
         result["tools_used"].append("ZIP/Archive Analyzer")
 
-    # APK tekshiruvi
+    # ── APK tekshiruvi ─────────────────────────────────────────────────────
     if ext == ".apk":
         apk_info = analyze_apk_permissions(path)
         result["apk_info"] = apk_info
         result["base_score"] = max(result["base_score"], apk_info.get("score", 0))
         result["reasons"].extend(apk_info.get("reasons", []))
-        if apk_info.get("ok"):
-            result["tools_used"].append("Androguard (APK Analyzer)")
-        else:
-            result["tools_used"].append("Androguard (cheklangan)")
+        result["tools_used"].append(
+            "Androguard (APK Analyzer)" if apk_info.get("ok") else "Androguard (cheklangan)"
+        )
 
-    # PDF tekshiruvi
+    # ── PDF tekshiruvi ─────────────────────────────────────────────────────
     if ext == ".pdf":
         pdf_info = analyze_pdf(path)
         result["pdf_info"] = pdf_info
@@ -139,7 +152,7 @@ async def analyze_saved_file(
         result["reasons"].extend(pdf_info.get("reasons", []))
         result["tools_used"].append("PDF Analyzer")
 
-    # Rasm tekshiruvi (OCR + QR)
+    # ── Rasm tekshiruvi (OCR + QR) ─────────────────────────────────────────
     if ext in IMAGE_EXTS or safe_lower(mime_type).startswith("image/"):
         ocr_info = extract_image_text(path)
         qr_info = extract_qr_data(path)
@@ -176,19 +189,19 @@ async def analyze_saved_file(
                     result["base_score"] = max(result["base_score"], best["score"])
                     result["reasons"].append("QR ichidagi havola tahlil qilindi")
 
-    # ClamAV skanerlash
+    # ── ClamAV skanerlash ──────────────────────────────────────────────────
     clamav_result = scan_with_clamav(path)
     result["clamav"] = clamav_result
     if clamav_result.get("enabled"):
         result["tools_used"].append("ClamAV Antivirus")
-    
-    # YARA skanerlash
+
+    # ── YARA skanerlash ────────────────────────────────────────────────────
     yara_result = scan_with_yara(path)
     result["yara"] = yara_result
     if yara_result.get("enabled"):
         result["tools_used"].append("YARA Scanner")
 
-    # VirusTotal tekshiruv
+    # ── VirusTotal tekshiruvi ──────────────────────────────────────────────
     if settings.VT_API_KEY:
         result["tools_used"].append("VirusTotal API")
         async with aiohttp.ClientSession() as session:
@@ -203,9 +216,13 @@ async def analyze_saved_file(
                     )
                     result["vt_stats"] = analysis.get("stats", {})
 
+    # ── Skanerlash vaqtini qayd etish ────────────────────────────────────
+    elapsed_ms = int((time.monotonic() - scan_start) * 1000)
+    result["scan_time_ms"] = elapsed_ms
+
     logger.info(
-        "✅ Tahlil yakunlandi: %s — %d ta vosita ishlatildi",
-        filename, len(result["tools_used"]),
+        "✅ Tahlil yakunlandi: %s — %d ta vosita, %d ms",
+        filename, len(result["tools_used"]), elapsed_ms,
     )
 
     return calculate_final_risk(result)

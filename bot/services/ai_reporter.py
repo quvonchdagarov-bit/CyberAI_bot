@@ -1,33 +1,46 @@
-"""Gemini AI bilan kengaytirilgan xavfsizlik hisoboti generatori."""
+"""Gemini AI — kengaytirilgan professional xavfsizlik hisoboti.
+
+Yangilangan:
+- MITRE ATT&CK framework terminologiyasi
+- AbuseIPDB, URLScan, Metadata natijalari
+- Aniq tavsiyalar (nima qilish, nima qilmaslik)
+- Yanada professional va batafsil prompt
+- Token limitni boshqarish
+"""
 
 from typing import Any
 
 from bot.config import settings
 from bot.loader import logger
 
-# Gemini client yaratish
-_gemini_model = None
+_gemini_client = None
 
 
-def _get_gemini_model():
+def _get_gemini_client():
     """Gemini modelini yuklash (lazy init)."""
-    global _gemini_model
-    if _gemini_model is not None:
-        return _gemini_model
+    global _gemini_client
+    if _gemini_client is not None:
+        return _gemini_client
 
     if not settings.GEMINI_API_KEY:
         return None
 
     try:
         from google import genai
-
         client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        _gemini_model = client
-        logger.info("Gemini AI client tayyor.")
+        _gemini_client = client
+        logger.info("✅ Gemini AI client tayyor (%s)", settings.GEMINI_MODEL)
         return client
     except Exception as e:
         logger.warning("Gemini yuklashda xato: %s", e)
         return None
+
+
+def _truncate(text: str, max_len: int = 500) -> str:
+    """Matnni belgilangan uzunlikda kesish."""
+    if not text:
+        return ""
+    return text[:max_len] + ("..." if len(text) > max_len else "")
 
 
 async def ai_expand_security_report(
@@ -38,142 +51,173 @@ async def ai_expand_security_report(
 ) -> str:
     """Gemini AI yordamida professional xavfsizlik hisoboti yaratish.
 
-    Barcha 13 ta vosita natijalarini birlashtirib,
-    professional va tushunarli xulosa beradi.
+    MITRE ATT&CK terminologiyasi va professional tahlil bilan.
     """
-    client = _get_gemini_model()
-
+    client = _get_gemini_client()
     if client is None:
         return f"{warning_text}\n\n{detailed_report}"
 
-    # Ishlatilgan vositalar ro'yxati
+    score = result.get("score", 0)
     tools_used = result.get("tools_used", [])
-    tools_text = ", ".join(tools_used) if tools_used else "Nomaʼlum"
 
-    # YARA detallari
+    # ── Tahlil natijalarini yig'ish ────────────────────────────────────────
+    sections = []
+
+    # YARA
     yara_info = result.get("yara", {})
-    yara_details = ""
     if yara_info.get("matches"):
-        yara_details = f"\nYARA mosliklari: {', '.join(yara_info['matches'])}"
         details = yara_info.get("details", [])
-        for d in details[:5]:
-            desc = d.get("description", "")
-            sev = d.get("severity", "")
-            if desc:
-                yara_details += f"\n  - {d['rule']}: {desc} (jiddiylik: {sev})"
+        yara_text = f"YARA mosliklari: {len(yara_info['matches'])} ta"
+        for d in details[:3]:
+            yara_text += f"\n  - {d.get('rule')}: {_truncate(d.get('description',''), 100)} (Jiddiylik: {d.get('severity','')})"
+        sections.append(("YARA Scanner", yara_text))
 
-    # APK detallari
+    # APK
     apk_info = result.get("apk_info", {})
-    apk_details = ""
     if apk_info.get("ok"):
-        apk_details = (
-            f"\nAPK: {apk_info.get('app_name', '?')} ({apk_info.get('package_name', '?')})"
-            f"\n  Jami ruxsatlar: {apk_info.get('permission_count', 0)}"
-            f"\n  Xavfli ruxsatlar: {', '.join(apk_info.get('permissions', [])[:8])}"
-            f"\n  Activities: {apk_info.get('activities_count', 0)}"
-            f"\n  Services: {apk_info.get('services_count', 0)}"
-            f"\n  Receivers: {apk_info.get('receivers_count', 0)}"
+        apk_text = (
+            f"Ilova: {apk_info.get('app_name', '?')} | "
+            f"Paket: {apk_info.get('package_name', '?')}\n"
+            f"Xavfli ruxsatlar: {', '.join(apk_info.get('permissions', [])[:6])}\n"
+            f"Shubhali API: {', '.join(apk_info.get('suspicious_apis', [])[:3])}"
         )
-        if apk_info.get("suspicious_apis"):
-            apk_details += f"\n  Shubhali API: {', '.join(apk_info['suspicious_apis'][:5])}"
+        sections.append(("APK Tahlili (Androguard)", apk_text))
 
-    # OCR detallari
-    ocr_info = result.get("ocr_info", {})
-    ocr_text = ""
-    if ocr_info.get("text"):
-        ocr_text = f"\nOCR matn (rasm ichidan): {ocr_info['text'][:500]}"
+    # Metadata
+    meta = result.get("metadata", {})
+    if meta.get("enabled") and meta.get("score", 0) > 0:
+        _unknown = "noma'lum"
+        meta_text = f"Muallif: {meta.get('author', _unknown)} | Yaratuvchi: {meta.get('creator', _unknown)}"
+        if meta.get("gps_found"):
+            meta_text += " | GPS koordinatlar mavjud"
+        if meta.get("reasons"):
+            meta_text += f"\nSabab: {'; '.join(meta['reasons'][:3])}"
+        sections.append(("Metadata Tahlili", meta_text))
 
-    # QR detallari
-    qr_info = result.get("qr_info", {})
-    qr_text = ""
-    if qr_info.get("values"):
-        qr_text = f"\nQR kod qiymatlari: {', '.join(qr_info['values'][:3])}"
+    # ClamAV
+    clamav = result.get("clamav", {})
+    if clamav.get("found"):
+        _sig = clamav.get("signature", "noma'lum")
+        sections.append(("ClamAV Antivirus", f"Virus topildi: {_sig}"))
 
-    # Archive detallari
-    archive_info = result.get("archive_info", {})
-    archive_text = ""
-    if archive_info.get("found_files"):
-        archive_text = f"\nArxiv ichidagi shubhali fayllar: {', '.join(archive_info['found_files'][:8])}"
+    # VirusTotal
+    vt_stats = result.get("vt_stats") or {}
+    if vt_stats:
+        malicious = vt_stats.get("malicious", 0)
+        suspicious = vt_stats.get("suspicious", 0)
+        total = sum(vt_stats.values())
+        sections.append(("VirusTotal", f"{total} dvijok: {malicious} zararli, {suspicious} shubhali"))
 
-    # PDF detallari
-    pdf_info = result.get("pdf_info", {})
-    pdf_text = ""
-    if pdf_info.get("hits"):
-        pdf_text = f"\nPDF shubhali elementlar: {', '.join(pdf_info['hits'][:6])}"
+    # AbuseIPDB
+    abuse = result.get("abuseipdb", {})
+    if abuse.get("enabled") and abuse.get("threat"):
+        sections.append((
+            "AbuseIPDB",
+            f"IP: {abuse.get('ip')} | Xavf: {abuse.get('abuse_score')}% | "
+            f"{abuse.get('total_reports')} hisobot | {abuse.get('country', '?')} | "
+            f"ISP: {_truncate(abuse.get('isp', '?'), 40)}"
+        ))
 
     # Safe Browsing
-    safe_browsing = result.get("safe_browsing", {})
-    sb_text = ""
-    if safe_browsing.get("matches"):
-        sb_text = f"\nGoogle Safe Browsing: {len(safe_browsing['matches'])} ta xavfli match topildi"
+    sb = result.get("safe_browsing", {})
+    if sb.get("matches"):
+        sections.append(("Google Safe Browsing", f"{len(sb['matches'])} ta xavfli match"))
 
-    prompt = f"""
-Siz professional cyber security tahlilchi botsiz.
-Quyidagi ma'lumotlar asosida zamonaviy, aniq, real va professional o'zbek tilida yakuniy javob yozing.
+    # OCR
+    ocr_info = result.get("ocr_info", {})
+    if ocr_info.get("text"):
+        sections.append(("OCR (Rasm ichidagi matn)", _truncate(ocr_info["text"], 300)))
 
-Qoidalar:
-- Vahima uyg'otmang.
-- Asossiz da'vo qilmang.
-- Faqat mavjud evidence asosida yozing.
-- 4 bo'limli formatda yozing:
-  1) Yakuniy hukm
-  2) Ishlatilgan vositalar va natijalari
-  3) Nega shunday baho berildi
-  4) Foydalanuvchi nima qilishi kerak
-- Agar evidence kuchli bo'lsa, "ma'lumotlar o'g'irlanishi mumkin", "akkaunt xavf ostida qolishi mumkin" kabi iboralarni ishlating.
-- Agar evidence kuchsiz bo'lsa, ehtimol shaklida yozing.
-- Natija 900 belgidan 2500 belgigacha bo'lsin.
-- Til: lotin yozuvidagi o'zbekcha.
+    # QR
+    qr_info = result.get("qr_info", {})
+    if qr_info.get("values"):
+        sections.append(("QR Kod", ", ".join(qr_info["values"][:2])))
 
-Content type: {content_type}
-Score: {result.get("score", 0)}
-Reasons: {result.get("reasons", [])}
+    # Archive
+    archive = result.get("archive_info", {})
+    if archive.get("found_files"):
+        sections.append(("Arxiv", ", ".join(archive["found_files"][:5])))
 
-ISHLATILGAN VOSITALAR: {tools_text}
+    # PDF
+    pdf_info = result.get("pdf_info", {})
+    if pdf_info.get("hits"):
+        sections.append(("PDF Tahlili", ", ".join(pdf_info["hits"][:4])))
 
-VT stats: {result.get("vt_stats", {})}
-ClamAV: {result.get("clamav", {})}
-{yara_details}
-{apk_details}
-{ocr_text}
-{qr_text}
-{archive_text}
-{pdf_text}
-{sb_text}
+    # Typosquatting
+    reasons = result.get("reasons", [])
+    typo_reasons = [r for r in reasons if "typosquatting" in r or "homograph" in r]
+    if typo_reasons:
+        sections.append(("Typosquatting/Homograph", typo_reasons[0]))
 
-Entropiya: {result.get("entropy", "N/A")}
-SHA256: {result.get("sha256", "N/A")}
-Fayl hajmi: {result.get("size_human", "N/A")}
+    # ── Prompt yaratish ────────────────────────────────────────────────────
+    sections_text = ""
+    for title, content in sections:
+        sections_text += f"\n\n### {title}\n{content}"
 
-Qisqa warning:
-{warning_text}
+    file_info = ""
+    if result.get("filename"):
+        file_info = (
+            f"Fayl: {result['filename']}\n"
+            f"SHA256: {result.get('sha256', 'N/A')}\n"
+            f"Hajm: {result.get('size_human', 'N/A')}\n"
+            f"Entropiya: {result.get('entropy', 'N/A')}\n"
+        )
+    elif result.get("url"):
+        file_info = f"URL: {result['url'][:100]}\n"
 
-Batafsil hisobot:
-{detailed_report}
+    prompt = f"""Siz dunyo darajasidagi professional kiberxavfsizlik tahlilchisisiz.
+Quyidagi REAL tahlil natijalarini ko'rib, foydalanuvchi uchun aniq, professional va harakatga yo'naltiruvchi xavfsizlik hisoboti yozing.
+
+---
+## TAHLIL MA'LUMOTLARI
+
+Content turi: {content_type}
+Risk skori: {score}/100
+Skanerlash vaqti: {result.get('scan_time_ms', 0)}ms
+Ishlatilgan vositalar: {', '.join(tools_used)}
+{file_info}
+Aniqlangan sabablar: {'; '.join(reasons[:6])}
+{sections_text}
+
+---
+## YOZISH QOIDALARI
+
+1. **Til:** O'zbek tili (lotin yozuvi) — sodda va aniq
+2. **Format:** Quyidagi 4 bo'limda yozilsin:
+   - 🔴 **YAKUNIY HUKM** — xavf darajasini bir jumlada aniq ayt
+   - 🔍 **NIMA ANIQLANDI** — konkret evidence va texnik tushuntirish (MITRE ATT&CK terminlariga mos agar kerak bo'lsa)
+   - ⚠️ **XAVF NIMA** — real oqibatlar (ma'lumot o'g'irlanishi, akkaunt buzilishi va h.k.) faqat mavjud evidence asosida
+   - ✅ **NIMA QILISH KERAK** — aniq va amaliy 3-5 ta qadam
+3. **Muhim:** Asossiz da'vo qilmang. Faqat mavjud evidence asosida yozing.
+4. **Uzunlik:** 600-1200 belgi. Juda qisqa yoki juda uzun bo'lmasin.
+5. **Agar xavf past bo'lsa:** Xotirjam izohlang, vahima uyg'otmang.
 """.strip()
 
     import asyncio
-
     max_retries = 3
     retry_delay = 5
 
     for attempt in range(max_retries):
         try:
-            # Asinxron chaqiruvdan foydalanamiz (bot qotib qolmasligi uchun)
             response = await client.aio.models.generate_content(
                 model=settings.GEMINI_MODEL,
                 contents=prompt,
             )
             text = (response.text or "").strip()
-            return text or f"{warning_text}\n\n{detailed_report}"
+            if text:
+                return text
+            return f"{warning_text}\n\n{detailed_report}"
         except Exception as e:
             error_str = str(e)
             if "429" in error_str and attempt < max_retries - 1:
-                logger.warning(f"Gemini API limitiga yetildi (429). {retry_delay} soniyadan keyin qayta urinib ko'rilmoqda... (Urinish {attempt + 1}/{max_retries})")
+                logger.warning(
+                    "Gemini API limit (429). %ds da qayta urinish... (%d/%d)",
+                    retry_delay, attempt + 1, max_retries,
+                )
                 await asyncio.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
+                retry_delay *= 2
             else:
-                logger.warning("Gemini AI report xatosi: %s", e)
+                logger.warning("Gemini AI xatosi: %s", e)
                 return f"{warning_text}\n\n{detailed_report}"
-    
+
     return f"{warning_text}\n\n{detailed_report}"

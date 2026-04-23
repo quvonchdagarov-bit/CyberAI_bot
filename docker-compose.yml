@@ -1,11 +1,14 @@
-version: '3.8'
+version: '3.9'
 
 services:
-  # 1. Telegram Bot servisi
+
+  # ── 1. Telegram Bot ──────────────────────────────────────────────────────
   bot:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: cyberai_bot
-    restart: always
+    restart: unless-stopped
     env_file:
       - .env
     volumes:
@@ -14,23 +17,68 @@ services:
       - ./quarantine:/app/quarantine
       - ./rules:/app/rules
       - ./archive:/app/archive
+      - ./logs:/app/logs
+    networks:
+      - cyberai_net
     depends_on:
       clamav:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.5"
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
-  # 2. ClamAV Antivirus servisi
+  # ── 2. ClamAV Antivirus ──────────────────────────────────────────────────
   clamav:
     image: clamav/clamav:latest
     container_name: clamav_scanner
-    restart: always
-    # ClamAV ko'p resurs talab qilishi mumkin, limit qo'yish ixtiyoriy
-    # deploy:
-    #   resources:
-    #     limits:
-    #       memory: 1G
+    restart: unless-stopped
+    networks:
+      - cyberai_net
+    volumes:
+      - clamav_db:/var/lib/clamav
+    environment:
+      - CLAMAV_NO_FRESHCLAMD=0
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+          cpus: "1.0"
+        reservations:
+          memory: 512M
     healthcheck:
-      test: ["CMD", "clamdscan", "--version"]
-      interval: 20s
+      test: ["CMD-SHELL", "echo 'PING' | nc -w 3 127.0.0.1 3310 | grep -q PONG || exit 1"]
+      interval: 30s
       timeout: 10s
       retries: 10
-      start_period: 30s
+      start_period: 120s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+# ── Tarmoq ─────────────────────────────────────────────────────────────────
+networks:
+  cyberai_net:
+    driver: bridge
+    internal: false
+
+# ── Volume-lar ──────────────────────────────────────────────────────────────
+volumes:
+  clamav_db:
+    driver: local

@@ -1,4 +1,4 @@
-"""Bot, Dispatcher va tashqi xizmat instance-lari."""
+"""Bot, Dispatcher va tashqi xizmat instance-lari — CyberAI Pro v2.1."""
 
 import logging
 import shutil
@@ -163,13 +163,34 @@ def check_tools_status():
     # 12. AI (Gemini)
     tools_status["AI"] = bool(settings.GEMINI_API_KEY)
     if settings.GEMINI_API_KEY:
-        logger.info("✅ Gemini AI Reporter: faol")
+        logger.info("✅ Gemini AI Reporter: faol (%s)", settings.GEMINI_MODEL)
     else:
         logger.warning("⚠️ Gemini AI: API kalit topilmadi")
 
     # 13. Telegram Bot — har doim ishlaydi
     tools_status["TelegramBot"] = True
     logger.info("✅ Telegram Bot (aiogram): faol")
+
+    # 14. AbuseIPDB
+    tools_status["AbuseIPDB"] = bool(settings.ABUSEIPDB_API_KEY)
+    if settings.ABUSEIPDB_API_KEY:
+        logger.info("✅ AbuseIPDB IP Reputation: faol")
+    else:
+        logger.warning("⚠️ AbuseIPDB: API kalit topilmadi (ixtiyoriy)")
+
+    # 15. URLScan.io
+    tools_status["URLScan"] = bool(settings.URLSCAN_API_KEY)
+    if settings.URLSCAN_API_KEY:
+        logger.info("✅ URLScan.io: faol")
+    else:
+        logger.warning("⚠️ URLScan.io: API kalit topilmadi (ixtiyoriy)")
+
+    # 16. Xavfsiz o'chirish
+    tools_status["SecureDelete"] = settings.SECURE_DELETE
+    if settings.SECURE_DELETE:
+        logger.info("✅ Secure Delete (DoD 5220.22-M): faol")
+    else:
+        logger.info("ℹ️ Secure Delete: o'chirilgan (SECURE_DELETE=false)")
 
     # Umumiy natija
     active = sum(1 for v in tools_status.values() if v)

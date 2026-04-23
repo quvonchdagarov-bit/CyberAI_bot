@@ -1,4 +1,10 @@
-"""Fayl/media handler — fayllarni yuklab tahlil qilish."""
+"""Fayl/media handler — fayllarni yuklab tahlil qilish.
+
+Yangilangan:
+- Xavfsiz fayl o'chirish (DoD 5220.22-M)
+- Skanerlash vaqtini ko'rsatish
+- Karantin siyosati
+"""
 
 import time
 from pathlib import Path
@@ -10,11 +16,12 @@ from bot.config import settings
 from bot.loader import bot, logger
 from bot.analyzers.file_analyzer import analyze_saved_file
 from bot.analyzers.scoring import classify_risk_level
-from bot.database.models import save_scan
+from bot.database.models import save_scan, increment_user_scan_count
 from bot.keyboards.inline_kb import get_result_keyboard
 from bot.reports.formatter import format_detailed_report, format_short_result
 from bot.utils.constants import ARCHIVE_EXTS
 from bot.utils.telegram import resolve_telegram_file
+from bot.utils.secure_delete import secure_shred
 
 router = Router(name="file_handler")
 
@@ -29,28 +36,32 @@ async def handle_file_message(message: Message):
     user_id = message.from_user.id if message.from_user else 0
     chat_id = message.chat.id
 
-    # Hajm tekshiruvi
+    # ── Hajm tekshiruvi ──────────────────────────────────────────────────
     if file_size and file_size > settings.MAX_FILE_SIZE_MB * 1024 * 1024:
         await message.reply(
-            f"⚠️ Fayl juda katta. Maksimal hajm: <b>{settings.MAX_FILE_SIZE_MB} MB</b>."
+            f"⚠️ <b>Fayl juda katta!</b>\n"
+            f"📏 Fayl hajmi: <b>{file_size / (1024*1024):.1f} MB</b>\n"
+            f"📌 Maksimal: <b>{settings.MAX_FILE_SIZE_MB} MB</b>\n\n"
+            f"💡 Katta fayllarni VirusTotal.com saytida tekshiring."
         )
         return
 
-    # Status xabari — "tahlil qilinmoqda..."
+    # ── Status xabari ─────────────────────────────────────────────────────
     status_msg = await message.reply(
         "⏳ <b>Fayl qabul qilindi</b>\n"
-        f"📄 {filename}\n"
-        "🔄 Tahlil boshlanmoqda..."
+        f"📄 <code>{filename}</code>\n"
+        "🔄 Tahlil tayyorlanmoqda..."
     )
 
     temp_path = settings.DOWNLOAD_DIR / f"{int(time.time())}_{filename}"
+    scan_start = time.monotonic()
 
     try:
-        # Faylni yuklash
+        # ── Yuklash ───────────────────────────────────────────────────────
         try:
             await status_msg.edit_text(
                 "📥 <b>Fayl yuklab olinmoqda...</b>\n"
-                f"📄 {filename}"
+                f"📄 <code>{filename}</code>"
             )
         except Exception:
             pass
@@ -58,12 +69,12 @@ async def handle_file_message(message: Message):
         tg_file = await bot.get_file(file_id)
         await bot.download_file(tg_file.file_path, destination=temp_path, timeout=300)
 
-        # Tahlil bosqichi
+        # ── Tahlil ───────────────────────────────────────────────────────
         try:
             await status_msg.edit_text(
-                "🔍 <b>Fayl tahlil qilinmoqda...</b>\n"
-                f"📄 {filename}\n"
-                "⏳ Bu biroz vaqt olishi mumkin..."
+                "🔍 <b>Xavfsizlik tahlili boshlanmoqda...</b>\n"
+                f"📄 <code>{filename}</code>\n"
+                "🛡 16 ta vosita faol — biroz kuting..."
             )
         except Exception:
             pass
@@ -71,18 +82,22 @@ async def handle_file_message(message: Message):
         result = await analyze_saved_file(temp_path, filename, mime_type)
         tag = "archive" if Path(filename).suffix.lower() in ARCHIVE_EXTS else "file"
         score = int(result.get("score", 0))
+        scan_ms = int((time.monotonic() - scan_start) * 1000)
 
-        # Xavfli faylni karantinga ko'chirish
+        # ── Xavfli faylni karantinga ko'chirish ───────────────────────────
         if score >= 75:
             try:
                 quarantine_path = settings.QUARANTINE_DIR / f"{int(time.time())}_{filename}"
                 temp_path.replace(quarantine_path)
                 temp_path = quarantine_path
+                logger.warning(
+                    "🚨 Karantinga ko'chirildi: %s (score=%d)", filename, score
+                )
             except Exception:
                 pass
 
-        # Natijani DB ga saqlash
-        short_text = format_short_result(result, "file")
+        # ── DB ga saqlash ─────────────────────────────────────────────────
+        short_text = format_short_result(result, "file", scan_ms)
         full_text = format_detailed_report(result, "file", tag)
         scan_id = await save_scan(
             user_id=user_id,
@@ -94,32 +109,38 @@ async def handle_file_message(message: Message):
             result_data=result,
             short_report=short_text,
             full_report=full_text,
+            tools_count=len(result.get("tools_used", [])),
+            scan_time_ms=scan_ms,
         )
+
+        # ── Foydalanuvchi statistikasini yangilash ────────────────────────
+        await increment_user_scan_count(user_id)
 
         keyboard = get_result_keyboard(scan_id, score)
 
-        # Xavfli xabarni o'chirish
+        # ── Xavfli xabarni o'chirish ──────────────────────────────────────
         if score >= 70:
             from bot.database.models import get_user_setting
             auto_delete = await get_user_setting(user_id, "auto_delete")
-            
-            # Agar foydalanuvchi yoqgan bo'lsa (yoki settings.DELETE_BAD_MESSAGES global yoqilgan bo'lsa yordamchi)
             if auto_delete or settings.DELETE_BAD_MESSAGES:
                 try:
                     await message.delete()
                 except Exception as e:
-                    logger.warning("Xabarni o'chirishda xato (admin huquqi yo'q bo'lishi mumkin): %s", e)
+                    logger.warning("Xabarni o'chirishda xato: %s", e)
 
-        # Faqat risk belgilangan darajadan yuqori bo'lsa xabar berish
+        # ── Threshold tekshiruvi ──────────────────────────────────────────
         if score <= settings.GLOBAL_RISK_THRESHOLD:
-            logger.info("Low risk score (%d <= %d). Silencing alert for %s", score, settings.GLOBAL_RISK_THRESHOLD, filename)
+            logger.info(
+                "✅ Past xavf (%d <= %d): %s — ogohlantirish yuborilmadi",
+                score, settings.GLOBAL_RISK_THRESHOLD, filename,
+            )
             try:
                 await status_msg.delete()
             except Exception:
                 pass
             return
 
-        # Status xabarni natija bilan almashtirish
+        # ── Natijani ko'rsatish ───────────────────────────────────────────
         try:
             await status_msg.edit_text(short_text, reply_markup=keyboard)
         except Exception:
@@ -127,21 +148,25 @@ async def handle_file_message(message: Message):
             await message.answer(short_text, reply_markup=keyboard)
 
     except Exception as e:
-        logger.exception("Fayl tahlilida xato")
+        logger.exception("Fayl tahlilida xato: %s", filename)
         try:
             await status_msg.edit_text(
-                f"⚠️ Faylni tekshirishda xatolik yuz berdi:\n<code>{e}</code>"
+                f"⚠️ <b>Tahlilda xatolik yuz berdi</b>\n"
+                f"📄 <code>{filename}</code>\n"
+                f"<code>{str(e)[:200]}</code>"
             )
         except Exception:
-            await message.reply(
-                f"⚠️ Faylni tekshirishda xatolik yuz berdi:\n<code>{e}</code>"
-            )
+            await message.reply(f"⚠️ Xatolik: <code>{str(e)[:200]}</code>")
     finally:
-        try:
-            if temp_path.exists() and temp_path.parent == settings.DOWNLOAD_DIR:
-                temp_path.unlink()
-        except Exception:
-            pass
+        # ── Faylni xavfsiz o'chirish (DoD 5220.22-M) ──────────────────────
+        if temp_path.exists() and temp_path.parent == settings.DOWNLOAD_DIR:
+            if settings.SECURE_DELETE:
+                await secure_shred(temp_path)
+            else:
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
 
 
 @router.message(F.caption)
@@ -149,7 +174,6 @@ async def handle_caption_message(message: Message):
     """Fayl bilan kelgan caption ichidagi URLlarni tekshirish."""
     from bot.analyzers.url_analyzer import analyze_url
     from bot.utils.helpers import extract_urls
-    from bot.utils.telegram import maybe_delete
     import aiohttp
     import asyncio
 
